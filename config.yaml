@@ -1,0 +1,28 @@
+# Global configuration for training/testing
+
+device: "cuda"  # "cpu" or "cuda"
+
+# Environment
+env:
+  name: "SuperMarioBros-v0"
+  frame_stack: 4
+  gray_scale: true
+
+# Training
+train:
+  total_timesteps: 1000000
+  batch_size: 64
+  learning_rate: 0.0003
+  gamma: 0.99
+  imitation_weight: 0.7
+  log_interval: 1000
+  save_path: "checkpoints/mario.pt"
+
+# Data (for BC)
+data:
+  expert_data_path: "data/expert_data.pt"
+
+# Logging
+log:
+  log_dir: "runs"
+  save_interval: 50000
