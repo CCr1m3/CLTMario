@@ -9,8 +9,8 @@ import yaml
 import os
 import numpy as np
 
-from utils.env_wrapper import make_env
-from utils.model import MarioPolicyNet
+from env_wrapper import make_env
+from model import MarioPolicyNet
 
 
 def load_config(path="config.yaml"):

@@ -7,6 +7,8 @@ env:
   name: "SuperMarioBros-v0"
   frame_stack: 4
   gray_scale: true
+  resize_shape: [128, 120]
+  frame_skip: 4
 
 # Training
 train:
