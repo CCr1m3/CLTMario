@@ -48,6 +48,9 @@ def make_env(env_config):
 def make_env_human(env_config):
     env = gym.make(env_config["name"])
     env = JoypadSpace(env, CUSTOM_MOVEMENT)
+
+    if env_config.get("gray_scale", False):
+        env = PreprocessFrame(env, shape=tuple(env_config["resize_shape"]), grayscale=True)
     if env_config.get("frame_skip", 1) > 1:
         env = SkipFrame(env, skip=env_config["frame_skip"])
     env = FrameStack(env, env_config.get("frame_stack", 4))

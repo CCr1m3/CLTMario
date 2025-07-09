@@ -1,11 +1,8 @@
 gym-super-mario-bros==7.4.0
 nes-py==8.2.1
-gym[box2d]==0.25.2
+gym==0.25.2
 pygame==2.5.2
-torch==2.7.1+cu118
-torchvision==0.22.1+cu118
-torchaudio==2.7.1+cu118
+torch==2.7.1
 numpy==1.26.4
 opencv-python==4.6.0.66
 pyyaml==6.0.2
-tensorboard==2.19.0

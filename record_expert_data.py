@@ -7,7 +7,7 @@ import tkinter as tk
 import numpy as np
 import cv2
 import datetime
-from tkinter import simpledialog
+from tkinter import simpledialog, ttk
 from utils.env_wrapper import make_env_human
 from utils.actions import CUSTOM_MOVEMENT
 
@@ -37,27 +37,50 @@ def get_action_from_keys(keys):
         return 0 # NOOP
     
 def select_stage():
-    root = tk.Tk()
-    root.withdraw()
-    input_stage = simpledialog.askstring("Select Stage", "Enter the stage (e.g., 1-1):")
-    root.destroy()
-    if input_stage:
-        return (f"SuperMarioBros-{input_stage}-v0",(int(input_stage[0]), int(input_stage[2])))
+    valid_stages = [f"{w}-{s}" for w in range(1, 9) for s in range(1, 5)]
+
+    def get_selection():
+        selection = []
+        def on_submit():
+            stage = combo.get()
+            if stage in valid_stages:
+                selection.append(stage)
+                root.destroy()
+        root = tk.Tk()
+        root.title("Select Stage")
+        root.geometry("256x140")
+        tk.Label(root, text="Choose Stage:").pack(pady=5)
+        combo = ttk.Combobox(root, values=valid_stages, width=20, state="readonly")
+        combo.pack(pady=5)
+        combo.current(0)
+        combo.focus()
+        tk.Button(root, text="OK", command=on_submit).pack(pady=5)
+        root.mainloop()
+        return selection[0] if selection else None
+
+    stage_str = get_selection()
+    if stage_str:
+        world, stage = map(int, stage_str.split("-"))
+        return (f"SuperMarioBros-{stage_str}-v0", (world, stage))
     return None
 
 def record_expert_data():
     config = load_config()
     selected_stage = select_stage()
-    if selected_stage:
+    if not selected_stage is None:
         config["env"]["name"] = selected_stage[0]
+    else:
+        print("Did not select a level. Closing.")
+        return
 
     env = make_env_human(config["env"])
-    expert_data = []
+    states = []
+    actions = []
     
     pygame.init()
     screen = pygame.display.set_mode((300,300))
+    pygame.display.set_caption("Control Window")
 
-    expert_actions = []
     state = env.reset()
     done = False
     reset_flag = False
@@ -69,7 +92,7 @@ def record_expert_data():
     try:
         while not done:
             raw_frame = env.render(mode="rgb_array")
-            resized = cv2.resize(raw_frame, (512, 480), interpolation=cv2.INTER_NEAREST)
+            resized = cv2.resize(raw_frame, (768, 720), interpolation=cv2.INTER_NEAREST)
             bgr_frame = cv2.cvtColor(resized, cv2.COLOR_RGB2BGR)
             cv2.imshow("Super Mario Bros", bgr_frame)
 
@@ -89,15 +112,36 @@ def record_expert_data():
             action = get_action_from_keys(keys)
 
             next_state, reward, done_flag, info = env.step(action)
-            expert_actions.append(action)
+            actions.append(action)
+            gray = cv2.cvtColor(raw_frame.copy(), cv2.COLOR_RGB2GRAY)
+            resized_gray = cv2.resize(gray, (128, 120), interpolation=cv2.INTER_AREA)
+            state_tensor = torch.tensor(resized_gray.copy(), dtype=torch.uint8).unsqueeze(0)
+            states.append(state_tensor)
 
-            if info.get("flag_get") or info.get("world", 1) != selected_stage[1][0]:
+            if info.get("flag_get", 1) or info.get("world", 1) != selected_stage[1][0]:
                 level_finished = True
                 done = True
 
-            if reset_flag or info.get("life") == 0:
+            if done_flag and not info.get("flag_get", 1):
+                waiting = True
+                while waiting and not reset_flag:
+                    for event in pygame.event.get():
+                        if event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_r or event.key == pygame.K_F5:
+                                reset_flag = True
+                            if event.key == pygame.K_ESCAPE:
+                                done = True
+                waiting = False
                 state = env.reset()
-                expert_actions.clear()
+                actions.clear()
+                states.clear()
+                reset_flag = False
+                continue
+
+            if reset_flag:
+                state = env.reset()
+                actions.clear()
+                states.clear()
                 reset_flag = False
                 continue
 
@@ -113,15 +157,13 @@ def record_expert_data():
     finally:
         pygame.quit()
         env.close()
-        expert_data.append({
-            "actions": expert_actions
-        })
+        cv2.destroyAllWindows()
+
         if level_finished:
             os.makedirs(os.path.dirname(config["data"]["expert_data_path"]), exist_ok=True)
-            json_path = os.path.splitext(config["data"]["expert_data_path"])[0] + "-" + str(selected_stage[1][0])+"-"+ str(selected_stage[1][0]) + "_" + datetime.datetime.now().strftime("%d%m%y") + ".json"
-            with open(json_path, "w") as file:
-                json.dump(expert_data, file)
-            print(f"Saved expert data to {json_path}")
+            pt_path = os.path.splitext(config["data"]["expert_data_path"])[0] + f"-{selected_stage[1][0]}-{selected_stage[1][1]}_{datetime.datetime.now().strftime('%d%m%y')}.pt"
+            torch.save({"states": torch.stack(states), "actions": torch.tensor(actions)}, pt_path)
+            print(f"Saved expert data to {pt_path}")
         else:
             print("Level not finished. No data saved.")
 
