@@ -2,32 +2,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class MarioPolicyNet(nn.Module):
-    def __init__(self, input_shape, n_actions):
-        super().__init__()
-        c, h, w = input_shape
+class CNNPolicy(nn.Module):
+    def __init__(self, num_actions):
+        super(CNNPolicy, self).__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=8, stride=4)   # Input: (C, H, W) = (3, 120, 128)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
 
-        self.conv = nn.Sequential(
-            nn.Conv2d(c, 32, 8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),
-            nn.ReLU(),
-        )
+        # Compute conv output size: use dummy forward pass or compute manually
+        self.flattened_size = self._get_conv_output_shape()
 
-        conv_out_size = self._get_conv_out(input_shape)
-        self.fc = nn.Sequential(
-            nn.Linear(conv_out_size, 512),
-            nn.ReLU(),
-            nn.Linear(512, n_actions)
-        )
+        self.fc1 = nn.Linear(self.flattened_size, 512)
+        self.fc2 = nn.Linear(512, num_actions)  # outputs Q-values or logits per action
 
-    def _get_conv_out(self, shape):
-        o = self.conv(torch.zeros(1, *shape))
-        return int(np.prod(o.size()))
+    def _get_conv_output_shape(self):
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, 3, 120, 128)
+            x = self.conv1(dummy_input)
+            x = self.conv2(x)
+            x = self.conv3(x)
+            return int(torch.prod(torch.tensor(x.shape[1:])))
 
     def forward(self, x):
-        x = x / 255.0  # Normalize pixel values
-        conv_out = self.conv(x).view(x.size()[0], -1)
-        return self.fc(conv_out)
+        x = x / 255.0  # normalize to [0, 1]
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)  # flatten
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)  # Q-values/logits (no softmax)

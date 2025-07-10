@@ -9,20 +9,36 @@ env:
   gray_scale: true
   resize_shape: [128, 120]
   frame_skip: 4
+  num_actions: 36
 
 # Training
 train:
-  total_timesteps: 1000000
-  batch_size: 64
-  learning_rate: 0.0003
+  epochs: 10
+  updates_per_epoch: 100
+  lr: 0.0005
+  batch_size: 32
   gamma: 0.99
-  imitation_weight: 0.7
-  log_interval: 1000
-  save_path: "checkpoints/mario.pt"
+  epsilon_start: 1.0
+  epsilon_end: 0.1
+  epsilon_decay: 0.95
+  lambda_bc: 0.99
+  lambda_bc_decay: 0.96
+  dqn_steps_per_epoch: 400
+  replaybuffersize: 10000
+  target_update: 5
+  save_path: "models/combined_model.pt"
 
-# Data (for BC)
+
+
+
 data:
-  expert_data_path: "data/expert_data.pt"
+  expert_data_path: "data/expert"
+
+# Test
+test:
+  env_name: SuperMarioBros-v0
+  render: true
+  max_steps: 5000
 
 # Logging
 log:
