@@ -1,5 +1,4 @@
 import os
-import json
 import yaml
 import torch
 import pygame
@@ -7,6 +6,7 @@ import tkinter as tk
 import numpy as np
 import cv2
 import datetime
+from collections import deque
 from tkinter import simpledialog, ttk
 from utils.env_wrapper import make_env_human
 from utils.actions import CUSTOM_MOVEMENT
@@ -35,7 +35,7 @@ def get_action_from_keys(keys):
         return CUSTOM_MOVEMENT.index(pressed)
     else:
         return 0 # NOOP
-    
+
 def select_stage():
     valid_stages = [f"{w}-{s}" for w in range(1, 9) for s in range(1, 5)]
 
@@ -64,6 +64,11 @@ def select_stage():
         return (f"SuperMarioBros-{stage_str}-v0", (world, stage))
     return None
 
+def preprocess_frame(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    resized_gray = cv2.resize(gray, (128, 120), interpolation=cv2.INTER_AREA)
+    return torch.tensor(resized_gray.copy(), dtype=torch.uint8)  # shape: [120, 128]
+
 def record_expert_data():
     config = load_config()
     selected_stage = select_stage()
@@ -76,18 +81,30 @@ def record_expert_data():
     env = make_env_human(config["env"])
     states = []
     actions = []
-    
+    deltas_x = []
+    deltas_y = []
+
+    frame_stack = config["env"].get("frame_stack", 4)
+    frame_buffer = deque(maxlen=frame_stack)
+
     pygame.init()
     screen = pygame.display.set_mode((300,300))
     pygame.display.set_caption("Control Window")
 
     state = env.reset()
+    noop_action = 0
+    next_state, reward, done_flag, info = env.step(noop_action)
     done = False
     reset_flag = False
     level_finished = False
     print("Recording... Press ESC to stop.")
 
     clock = pygame.time.Clock()
+
+    # Initialize previous x/y
+    info = env.unwrapped._get_info() if hasattr(env.unwrapped, "_get_info") else {}
+    prev_x = info.get("x_pos", 0)
+    prev_y = info.get("y_pos", 0)
 
     try:
         while not done:
@@ -107,16 +124,32 @@ def record_expert_data():
                         print("Resetting level...")
                     break
 
-
             keys = pygame.key.get_pressed()
             action = get_action_from_keys(keys)
 
             next_state, reward, done_flag, info = env.step(action)
             actions.append(action)
-            gray = cv2.cvtColor(raw_frame.copy(), cv2.COLOR_RGB2GRAY)
-            resized_gray = cv2.resize(gray, (128, 120), interpolation=cv2.INTER_AREA)
-            state_tensor = torch.tensor(resized_gray.copy(), dtype=torch.uint8).unsqueeze(0)
-            states.append(state_tensor)
+
+            # Preprocess and stack frames
+            preprocessed = preprocess_frame(raw_frame)  # [120, 128]
+            frame_buffer.append(preprocessed)
+            if len(frame_buffer) < frame_stack:
+                # Pad with first frame if not enough frames yet
+                while len(frame_buffer) < frame_stack:
+                    frame_buffer.appendleft(preprocessed.clone())
+
+            stacked = torch.stack(list(frame_buffer), dim=0)  # [frame_stack, 120, 128]
+            states.append(stacked)
+
+            # Calculate deltas
+            x_pos = info.get("x_pos", prev_x)
+            y_pos = info.get("y_pos", prev_y)
+            delta_x = x_pos - prev_x
+            delta_y = y_pos - prev_y
+            deltas_x.append(delta_x)
+            deltas_y.append(delta_y)
+            prev_x = x_pos
+            prev_y = y_pos
 
             if info.get("flag_get", 1) or info.get("world", 1) != selected_stage[1][0]:
                 level_finished = True
@@ -135,6 +168,9 @@ def record_expert_data():
                 state = env.reset()
                 actions.clear()
                 states.clear()
+                deltas_x.clear()
+                deltas_y.clear()
+                frame_buffer.clear()
                 reset_flag = False
                 continue
 
@@ -142,6 +178,9 @@ def record_expert_data():
                 state = env.reset()
                 actions.clear()
                 states.clear()
+                deltas_x.clear()
+                deltas_y.clear()
+                frame_buffer.clear()
                 reset_flag = False
                 continue
 
@@ -160,13 +199,21 @@ def record_expert_data():
         cv2.destroyAllWindows()
 
         if level_finished:
-            os.makedirs(os.path.dirname(config["data"]["expert_data_path"]), exist_ok=True)
-            pt_path = os.path.splitext(config["data"]["expert_data_path"])[0] + f"-{selected_stage[1][0]}-{selected_stage[1][1]}_{datetime.datetime.now().strftime('%d%m%y')}.pt"
-            torch.save({"states": torch.stack(states), "actions": torch.tensor(actions)}, pt_path)
+            world, stage = selected_stage[1]
+            stage_folder = f"{world}-{stage}"
+            save_dir = os.path.join("data", stage_folder)
+            os.makedirs(save_dir, exist_ok=True)
+            timestamp = datetime.datetime.now().strftime('%d%m%y%H%M%S')
+            pt_path = os.path.join(save_dir, f"expert_{world}_{stage}_{timestamp}.pt")
+            torch.save({
+                "states": torch.stack(states),  # [N, frame_stack, 120, 128]
+                "actions": torch.tensor(actions),
+                "delta_x": torch.tensor(deltas_x, dtype=torch.float32),
+                "delta_y": torch.tensor(deltas_y, dtype=torch.float32)
+            }, pt_path)
             print(f"Saved expert data to {pt_path}")
         else:
             print("Level not finished. No data saved.")
-
 
 if __name__ == "__main__":
     record_expert_data()

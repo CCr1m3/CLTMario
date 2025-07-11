@@ -6,17 +6,24 @@ import numpy as np
 from utils.model import CNNPolicy
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-import cv2
 from utils.actions import CUSTOM_MOVEMENT
+from utils.env_wrapper import PreprocessFrame, SkipFrame
+from gym.wrappers import FrameStack
+import time
 
 def load_config(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-def preprocess(obs):
-    obs = cv2.resize(obs, (128, 120))  # Match training size
-    obs = np.transpose(obs, (2, 0, 1))  # HWC to CHW
-    return torch.tensor(obs, dtype=torch.float32).unsqueeze(0) / 255.0
+def make_test_env(env_name, env_config):
+    env = gym_super_mario_bros.make(env_name)
+    env = JoypadSpace(env, CUSTOM_MOVEMENT)
+    if env_config.get("gray_scale", False):
+        env = PreprocessFrame(env, shape=tuple(env_config["resize_shape"]), grayscale=True)
+    if env_config.get("frame_skip", 1) > 1:
+        env = SkipFrame(env, skip=env_config["frame_skip"])
+    env = FrameStack(env, env_config.get("frame_stack", 4))
+    return env
 
 def test():
     config = load_config()
@@ -24,46 +31,70 @@ def test():
 
     env_name = config["test"]["env_name"]
     render = config["test"]["render"]
-    model_path = config["training"]["model_path"]
+    model_path = config["training"]["save_path"]
     max_steps = config["test"]["max_steps"]
+    env_config = config["env"]
 
-    env = gym_super_mario_bros.make(env_name)
-    env = JoypadSpace(env, CUSTOM_MOVEMENT)
+    num_attempts = config["test"].get("num_attempts", 1)
 
-    model = CNNPolicy().to(device)
+    env = make_test_env(env_name, env_config)
+
+    model = CNNPolicy(num_actions=len(CUSTOM_MOVEMENT)).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    obs = env.reset()
-    total_reward = 0
-    steps = 0
+    for attempt in range(1, num_attempts + 1):
+        print(f"\n=== Playthrough Attempt {attempt} ===")
+        obs = env.reset()
+        total_reward = 0
+        steps = 0
 
-    # Consistency with training (optional): use Q-values if lambda_bc was small
-    lambda_bc = config["training"].get("lambda_bc", 1.0)
-    lambda_bc_threshold = 0.5
-    use_q_values = lambda_bc < lambda_bc_threshold
+        # Get initial info by taking a NOOP step
+        noop_action = 0
+        obs, _, done, info = env.step(noop_action)
+        obs_arr = np.array(obs)
+        if obs_arr.shape[-1] == 1:
+            obs_arr = np.squeeze(obs_arr, axis=-1)  # [4, 120, 128]
+        state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0  # [1, 4, 120, 128]
 
-    while True:
-        if render:
-            env.render()
+        prev_x = info.get("x_pos", 0)
+        prev_y = info.get("y_pos", 0)
 
-        state = preprocess(obs).to(device)
-        with torch.no_grad():
-            logits, q_values = model(state)
-            if use_q_values:
-                action = torch.argmax(q_values, dim=1).item()
-            else:
+        while True:
+            if render:
+                env.render()
+                time.sleep(0.05)
+
+            # Calculate delta_x and delta_y
+            cur_x = info.get("x_pos", 0)
+            cur_y = info.get("y_pos", 0)
+            delta_x = cur_x - prev_x
+            delta_y = cur_y - prev_y
+            extra = torch.tensor([[delta_x, delta_y]], dtype=torch.float32).to(device)
+
+            with torch.no_grad():
+                logits = model(state, extra=extra)
                 action = torch.argmax(logits, dim=1).item()
 
-        obs, reward, done, info = env.step(action)
-        total_reward += reward
-        steps += 1
+            obs, reward, done, info = env.step(action)
+            obs_arr = np.array(obs)
+            if obs_arr.shape[-1] == 1:
+                obs_arr = np.squeeze(obs_arr, axis=-1)  # [4, 120, 128]
+            state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0  # [1, 4, 120, 128]
 
-        if done or steps >= max_steps:
-            break
+            total_reward += reward
+            steps += 1
+
+            prev_x = cur_x
+            prev_y = cur_y
+
+            if done or steps >= max_steps:
+                break
+
+        print(f"Attempt {attempt} completed. Total reward: {total_reward}, Steps: {steps}")
 
     env.close()
-    print(f"Test completed. Total reward: {total_reward}, Steps: {steps}")
+    print("All playthroughs completed.")
 
 if __name__ == "__main__":
     test()

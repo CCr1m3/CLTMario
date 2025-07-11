@@ -12,8 +12,8 @@ env:
   num_actions: 36
 
 # Training
-train:
-  epochs: 10
+training:
+  epochs: 30
   updates_per_epoch: 100
   lr: 0.0005
   batch_size: 32
@@ -24,21 +24,24 @@ train:
   lambda_bc: 0.99
   lambda_bc_decay: 0.96
   dqn_steps_per_epoch: 400
-  replaybuffersize: 10000
+  replaybuffersize: 50000
   target_update: 5
+  pbt_population_size: 3
+  pbt_exploit_interval: 3
   save_path: "models/combined_model.pt"
 
 
 
 
 data:
-  expert_data_path: "data/expert"
+  expert_data_path: "data/"
 
 # Test
 test:
   env_name: SuperMarioBros-v0
   render: true
   max_steps: 5000
+  num_attempts: 1
 
 # Logging
 log:
