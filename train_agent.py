@@ -92,6 +92,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
     lambda_bc_decay = agent_hyperparams["lambda_bc_decay"]
     replay_buffer_size = config["training"]["replaybuffersize"]
     gamma = config["training"]["gamma"]
+    explorations_per_epoch = config["training"]["exploration_episodes_per_epoch"]
     dqn_steps_per_epoch = config["training"]["dqn_steps_per_epoch"]
     epsilon_start = config["training"]["epsilon_start"]
     epsilon_end = config["training"]["epsilon_end"]
@@ -110,7 +111,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
 
     try:
         for epoch in range(num_epochs):
-            print(f"[==========EPOCH {epoch + 1}==========]")
+            print(f"[==========AGENT {agent_id}: EPOCH {epoch + 1}==========]")
             # --- Load expert data for BC ---
             all_files = glob.glob(os.path.join(data_path, "*", "*.pt"))
             if not all_files:
@@ -143,9 +144,11 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
             writer.add_scalar("Hyperparams/LambdaBC_Epoch", lambda_bc_epoch, epoch)
 
             if len(replay_buffer) < batch_size:
+                print("not enough replay_buffer, jumping to next epoch")
                 continue
 
             # --- Behavior Cloning Phase ---
+            print(f"Agent {agent_id}: Starting Behavior Cloning phase on {stage[0]}-{stage[1]}")
             expert_dataset = TensorDataset(
                 states.float() / 255.0,
                 actions,
@@ -166,89 +169,101 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 global_step += 1
 
             # --- Exploration Phase ---
-            env = make_env(stage, config["env"])
-            state = env.reset()
-            noop_action = 0  # or whatever index is NOOP in your action space
-            next_state_img, _, done, info = env.step(noop_action)
-            next_state_img = np.array(next_state_img)  # Ensure it's a numpy array
-            if next_state_img.shape[-1] == 1:
-                next_state_img = np.squeeze(next_state_img, axis=-1)  # (4, 120, 128)
-            state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0  # (1, 4, 120, 128)
-            done = False
-            prev_x = info["x_pos"]
-            prev_y = info["y_pos"]
-            prev_w = info["world"]
-            max_x = prev_x
-            subarea = False
-            episode_reward = 0
-
-            while not done:
-                # Calculate deltas for this step
-                delta_x_val = info["x_pos"] - prev_x
-                delta_y_val = info["y_pos"] - prev_y
-                extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
-
-                with torch.no_grad():
-                    logits = model(state, extra=extra)
-                    epsilon = max(epsilon_end, epsilon_start * (epsilon_decay ** epoch))
-                    if random.random() < epsilon:
-                        action = random.randint(0, logits.shape[1] - 1)
-                    else:
-                        if random.random() < lambda_bc_epoch:
-                            probs = torch.softmax(logits, dim=1)
-                            action = torch.multinomial(probs, num_samples=1).item()
-                        else:
-                            action = torch.argmax(logits, dim=1).item()
-                next_state_img, _, done, info = env.step(action)
-                next_state_img = np.array(next_state_img)
+            print(f"Agent {agent_id}: Starting Exploration phase on {stage[0]}-{stage[1]}")
+            for episode in range(1, explorations_per_epoch + 1):
+                env = make_env(stage, config["env"])
+                state = env.reset()
+                noop_action = 0  # or whatever index is NOOP in your action space
+                next_state_img, _, done, info = env.step(noop_action)
+                next_state_img = np.array(next_state_img)  # Ensure it's a numpy array
                 if next_state_img.shape[-1] == 1:
-                    next_state_img = np.squeeze(next_state_img, axis=-1)
-                next_state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0  # (1, 4, 120, 128)
-
-                # Rewards
-                shaped_reward, x_pos, cur_world, subarea = calculate_shaped_reward(
-                    info, prev_x, prev_w, max_x, subarea
-                )
-                # Update prev_x, prev_y, prev_w, max_x for next step
-                prev_x = x_pos
+                    next_state_img = np.squeeze(next_state_img, axis=-1)  # (4, 120, 128)
+                state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0  # (1, 4, 120, 128)
+                done = False
+                prev_x = info["x_pos"]
                 prev_y = info["y_pos"]
-                prev_w = cur_world
-                max_x = max(max_x, x_pos)
+                prev_w = info["world"]
+                max_x = prev_x
+                subarea = False
+                episode_reward = 0
+                max_steps = config["training"].get("max_steps_per_episode", 1000)
 
-                episode_reward += shaped_reward
-                replay_buffer.push(state.squeeze(0), action, shaped_reward, next_state.squeeze(0), done, delta_x_val, delta_y_val)
-                state = next_state
+                steps = 0
+                while not done and steps < max_steps:
+                    # Calculate deltas for this step
+                    delta_x_val = info["x_pos"] - prev_x
+                    delta_y_val = info["y_pos"] - prev_y
+                    extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
 
-            # --- DQN Phase ---
-            for _ in range(dqn_steps_per_epoch):
-                if len(replay_buffer) < batch_size:
-                    break
-                states, actions, rewards, next_states, dones, delta_xs, delta_ys = replay_buffer.sample(batch_size)
-                states = states.to(device)
-                actions = actions.to(device)
-                rewards = rewards.to(device)
-                next_states = next_states.to(device)
-                dones = dones.to(device)
-                batch_extra = torch.stack([delta_xs, delta_ys], dim=1).to(device)
+                    with torch.no_grad():
+                        logits = model(state, extra=extra)
+                        epsilon = max(epsilon_end, epsilon_start * (epsilon_decay ** epoch))
+                        if random.random() < epsilon:
+                            action = random.randint(0, logits.shape[1] - 1)
+                        else:
+                            if random.random() < lambda_bc_epoch:
+                                probs = torch.softmax(logits, dim=1)
+                                action = torch.multinomial(probs, num_samples=1).item()
+                            else:
+                                action = torch.argmax(logits, dim=1).item()
+                    next_state_img, _, done, info = env.step(action)
+                    next_state_img = np.array(next_state_img)
+                    if next_state_img.shape[-1] == 1:
+                        next_state_img = np.squeeze(next_state_img, axis=-1)
+                    next_state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0  # (1, 4, 120, 128)
 
-                q_values = model(states, extra=batch_extra)
-                with torch.no_grad():
-                    next_q_values = model(next_states, extra=batch_extra)
-                    max_next_q = next_q_values.max(1)[0]
-                    q_target = rewards + gamma * (1 - dones) * max_next_q
+                    # Rewards
+                    shaped_reward, x_pos, cur_world, subarea = calculate_shaped_reward(
+                        info, prev_x, prev_w, max_x, subarea
+                    )
+                    # Update prev_x, prev_y, prev_w, max_x for next step
+                    prev_x = x_pos
+                    prev_y = info["y_pos"]
+                    prev_w = cur_world
+                    max_x = max(max_x, x_pos)
 
-                q_pred = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
-                dqn_loss = F.mse_loss(q_pred, q_target)
+                    episode_reward += shaped_reward
+                    replay_buffer.push(state.squeeze(0), action, shaped_reward, next_state.squeeze(0), done, delta_x_val, delta_y_val)
+                    state = next_state
+                    steps += 1
 
-                optimizer.zero_grad()
-                dqn_loss.backward()
-                optimizer.step()
+                    # --- DQN Phase ---
+                    for i in range(dqn_steps_per_epoch):
+                        if len(replay_buffer) < batch_size:
+                            break
+                        states, actions, rewards, next_states, dones, delta_xs, delta_ys = replay_buffer.sample(batch_size)
+                        states = states.to(device)
+                        actions = actions.to(device)
+                        rewards = rewards.to(device)
+                        next_states = next_states.to(device)
+                        dones = dones.to(device)
+                        batch_extra = torch.stack([delta_xs, delta_ys], dim=1).to(device)
 
-                writer.add_scalar("Loss/DQN", dqn_loss.item(), global_step)
-                writer.add_scalar("Loss/Total", lambda_bc_epoch * bc_loss + (1 - lambda_bc_epoch) * dqn_loss.item(), global_step)
-                global_step += 1
+                        q_values = model(states, extra=batch_extra)
+                        with torch.no_grad():
+                            next_q_values = model(next_states, extra=batch_extra)
+                            max_next_q = next_q_values.max(1)[0]
+                            q_target = rewards + gamma * (1 - dones) * max_next_q
+
+                        q_pred = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
+                        dqn_loss = F.mse_loss(q_pred, q_target)
+
+                        optimizer.zero_grad()
+                        dqn_loss.backward()
+                        optimizer.step()
+
+                        writer.add_scalar("Loss/DQN", dqn_loss.item(), global_step)
+                        writer.add_scalar("Loss/Total", lambda_bc_epoch * bc_loss + (1 - lambda_bc_epoch) * dqn_loss.item(), global_step)
+                        global_step += 1
+                        
+                        #if i % 250 == 0:
+                        #    print(f"Agent {agent_id}: DQN Step {i} done.")
+                    
+                if episode % 5 == 0:
+                    print(f"Agent {agent_id}: Episode {episode} done.")
 
             # --- Evaluation ---
+            print(f"Agent {agent_id}: Starting Evaluation phase on {stage[0]}-{stage[1]}")
             eval_env = make_env(stage, config["env"])
             eval_state = eval_env.reset()
             noop_action = 0

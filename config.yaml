@@ -13,7 +13,7 @@ env:
 
 # Training
 training:
-  epochs: 30
+  epochs: 15
   updates_per_epoch: 100
   lr: 0.0005
   batch_size: 32
@@ -23,11 +23,13 @@ training:
   epsilon_decay: 0.95
   lambda_bc: 0.99
   lambda_bc_decay: 0.96
-  dqn_steps_per_epoch: 400
-  replaybuffersize: 50000
+  exploration_episodes_per_epoch: 25
+  max_steps_per_episode: 750
+  dqn_steps_per_epoch: 2
+  replaybuffersize: 40000
   target_update: 5
   pbt_population_size: 3
-  pbt_exploit_interval: 3
+  pbt_exploit_interval: 5
   save_path: "models/combined_model.pt"
 
 
