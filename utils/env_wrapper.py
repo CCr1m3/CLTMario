@@ -10,7 +10,7 @@ from collections import deque
 import cv2
 
 class PreprocessFrame(gym.ObservationWrapper):
-    def __init__(self, env, shape=(128, 120), grayscale=True):
+    def __init__(self, env, shape=(64, 60), grayscale=True):
         super().__init__(env)
         self.shape = shape
         self.grayscale = grayscale

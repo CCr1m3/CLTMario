@@ -54,8 +54,8 @@ def test():
         obs, _, done, info = env.step(noop_action)
         obs_arr = np.array(obs)
         if obs_arr.shape[-1] == 1:
-            obs_arr = np.squeeze(obs_arr, axis=-1)  # [4, 120, 128]
-        state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0  # [1, 4, 120, 128]
+            obs_arr = np.squeeze(obs_arr, axis=-1)
+        state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0
 
         prev_x = info.get("x_pos", 0)
         prev_y = info.get("y_pos", 0)
@@ -79,8 +79,8 @@ def test():
             obs, reward, done, info = env.step(action)
             obs_arr = np.array(obs)
             if obs_arr.shape[-1] == 1:
-                obs_arr = np.squeeze(obs_arr, axis=-1)  # [4, 120, 128]
-            state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0  # [1, 4, 120, 128]
+                obs_arr = np.squeeze(obs_arr, axis=-1)
+            state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0
 
             total_reward += reward
             steps += 1

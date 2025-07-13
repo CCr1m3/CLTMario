@@ -7,28 +7,29 @@ env:
   name: "SuperMarioBros-v0"
   frame_stack: 4
   gray_scale: true
-  resize_shape: [128, 120]
+  resize_shape: [64, 60]
   frame_skip: 4
-  num_actions: 36
+  num_actions: 11
 
 # Training
 training:
   epochs: 15
+  bc_epochs: 3
   updates_per_epoch: 100
   lr: 0.0005
   batch_size: 32
   gamma: 0.99
   epsilon_start: 1.0
-  epsilon_end: 0.1
+  epsilon_end: 0.3
   epsilon_decay: 0.95
   lambda_bc: 0.99
   lambda_bc_decay: 0.96
-  exploration_episodes_per_epoch: 25
+  exploration_episodes_per_epoch: 10
   max_steps_per_episode: 750
-  dqn_steps_per_epoch: 2
+  dqn_steps_per_epoch: 1
   replaybuffersize: 40000
   target_update: 5
-  pbt_population_size: 3
+  pbt_population_size: 2
   pbt_exploit_interval: 5
   save_path: "models/combined_model.pt"
 

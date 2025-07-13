@@ -5,17 +5,17 @@ import torch.nn.functional as F
 class CNNPolicy(nn.Module):
     def __init__(self, num_actions, frame_stack=4, extra_features=2):
         super(CNNPolicy, self).__init__()
-        self.conv1 = nn.Conv2d(frame_stack, 32, kernel_size=8, stride=4)   # Input: (C, H, W) = (4, 120, 128)
+        self.conv1 = nn.Conv2d(frame_stack, 32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
         self.extra_features = extra_features
         self.flattened_size = self._get_conv_output_shape(frame_stack)
         self.fc1 = nn.Linear(self.flattened_size + extra_features, 512)
-        self.fc2 = nn.Linear(512, num_actions)  # outputs Q-values or logits per action
+        self.fc2 = nn.Linear(512, num_actions)
 
     def _get_conv_output_shape(self, frame_stack):
         with torch.no_grad():
-            dummy_input = torch.zeros(1, frame_stack, 120, 128)
+            dummy_input = torch.zeros(1, frame_stack, 60, 64)
             x = self.conv1(dummy_input)
             x = self.conv2(x)
             x = self.conv3(x)

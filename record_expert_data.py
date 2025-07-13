@@ -66,8 +66,8 @@ def select_stage():
 
 def preprocess_frame(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-    resized_gray = cv2.resize(gray, (128, 120), interpolation=cv2.INTER_AREA)
-    return torch.tensor(resized_gray.copy(), dtype=torch.uint8)  # shape: [120, 128]
+    resized_gray = cv2.resize(gray, (64, 60), interpolation=cv2.INTER_AREA)
+    return torch.tensor(resized_gray.copy(), dtype=torch.uint8)
 
 def record_expert_data():
     config = load_config()
@@ -130,18 +130,15 @@ def record_expert_data():
             next_state, reward, done_flag, info = env.step(action)
             actions.append(action)
 
-            # Preprocess and stack frames
-            preprocessed = preprocess_frame(raw_frame)  # [120, 128]
+            preprocessed = preprocess_frame(raw_frame)
             frame_buffer.append(preprocessed)
             if len(frame_buffer) < frame_stack:
-                # Pad with first frame if not enough frames yet
                 while len(frame_buffer) < frame_stack:
                     frame_buffer.appendleft(preprocessed.clone())
 
-            stacked = torch.stack(list(frame_buffer), dim=0)  # [frame_stack, 120, 128]
+            stacked = torch.stack(list(frame_buffer), dim=0)
             states.append(stacked)
 
-            # Calculate deltas
             x_pos = info.get("x_pos", prev_x)
             y_pos = info.get("y_pos", prev_y)
             delta_x = x_pos - prev_x
@@ -206,7 +203,7 @@ def record_expert_data():
             timestamp = datetime.datetime.now().strftime('%d%m%y%H%M%S')
             pt_path = os.path.join(save_dir, f"expert_{world}_{stage}_{timestamp}.pt")
             torch.save({
-                "states": torch.stack(states),  # [N, frame_stack, 120, 128]
+                "states": torch.stack(states),
                 "actions": torch.tensor(actions),
                 "delta_x": torch.tensor(deltas_x, dtype=torch.float32),
                 "delta_y": torch.tensor(deltas_y, dtype=torch.float32)

@@ -58,7 +58,7 @@ def make_env(stage, env_config):
     env = FrameStack(env, env_config.get("frame_stack", 4))
     return env
 
-def calculate_shaped_reward(info, prev_x, prev_w, max_x, subarea):
+def calculate_shaped_reward(info, done, prev_x, prev_w, max_x, subarea):
     x_pos = info["x_pos"]
     delta_x = x_pos - prev_x
     max_x = max(max_x, x_pos)
@@ -81,7 +81,10 @@ def calculate_shaped_reward(info, prev_x, prev_w, max_x, subarea):
     cur_world = info["world"]
     if cur_world != prev_w:
         shaped_reward += (cur_world - prev_w) * 12000
-    return shaped_reward, x_pos, cur_world, subarea
+    # died
+    if done and not info["flag_get"]:
+        shaped_reward -= 100
+    return shaped_reward, max_x, subarea
 
 def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent_hyperparams, result_queue):
     # Set up agent-specific objects
@@ -109,15 +112,24 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
     best_score = -float('inf')
     best_weights = None
 
-    try:
-        for epoch in range(num_epochs):
-            print(f"[==========AGENT {agent_id}: EPOCH {epoch + 1}==========]")
-            # --- Load expert data for BC ---
-            all_files = glob.glob(os.path.join(data_path, "*", "*.pt"))
-            if not all_files:
-                print(f"[Agent {agent_id}] No expert data found.")
-                return
 
+    all_files = glob.glob(os.path.join(data_path, "*", "*.pt"))
+    if not all_files:
+        print(f"[Agent {agent_id}] No expert data found.")
+        return
+    
+    for selected in all_files:
+        dataset = torch.load(selected)
+        states = dataset["states"]
+        actions = dataset["actions"]
+        delta_x = dataset["delta_x"]
+        delta_y = dataset["delta_y"]
+        for s, a, dx, dy in zip(states, actions, delta_x, delta_y):
+            replay_buffer.push(s.float().cpu() / 255.0, a.cpu().item(), 0.0, s.float().cpu() / 255.0, False, dx.item(), dy.item())
+    try:
+        for epoch in range(1, num_epochs+1):
+            print(f"[==========AGENT {agent_id}: EPOCH {epoch}==========]")
+            # --- Load expert data for BC ---
             selected = random.choice(all_files)
             stage_folder = os.path.basename(os.path.dirname(selected))
             try:
@@ -126,16 +138,11 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
             except ValueError:
                 print(f"[Agent {agent_id}] Invalid stage format in folder name: {stage_folder}")
                 return
-
             dataset = torch.load(selected)
             states = dataset["states"]
             actions = dataset["actions"]
             delta_x = dataset["delta_x"]
             delta_y = dataset["delta_y"]
-
-            # Fill replay buffer with expert data (use delta_x, delta_y)
-            for s, a, dx, dy in zip(states, actions, delta_x, delta_y):
-                replay_buffer.push(s.float() / 255.0, a.cpu().item(), 0.0, s.float() / 255.0, False, dx.item(), dy.item())
 
             lambda_bc_epoch = lambda_bc * (lambda_bc_decay ** epoch)
             writer.add_scalar("Lambda/BC", lambda_bc_epoch, epoch)
@@ -170,27 +177,27 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
 
             # --- Exploration Phase ---
             print(f"Agent {agent_id}: Starting Exploration phase on {stage[0]}-{stage[1]}")
+            episode_rewards_this_epoch = []
+            env = make_env(stage, config["env"])
             for episode in range(1, explorations_per_epoch + 1):
-                env = make_env(stage, config["env"])
                 state = env.reset()
-                noop_action = 0  # or whatever index is NOOP in your action space
+                noop_action = 0 
                 next_state_img, _, done, info = env.step(noop_action)
-                next_state_img = np.array(next_state_img)  # Ensure it's a numpy array
+                next_state_img = np.array(next_state_img)
                 if next_state_img.shape[-1] == 1:
-                    next_state_img = np.squeeze(next_state_img, axis=-1)  # (4, 120, 128)
-                state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0  # (1, 4, 120, 128)
+                    next_state_img = np.squeeze(next_state_img, axis=-1)
+                state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0
                 done = False
                 prev_x = info["x_pos"]
+                max_x = prev_x
                 prev_y = info["y_pos"]
                 prev_w = info["world"]
-                max_x = prev_x
                 subarea = False
                 episode_reward = 0
                 max_steps = config["training"].get("max_steps_per_episode", 1000)
 
                 steps = 0
                 while not done and steps < max_steps:
-                    # Calculate deltas for this step
                     delta_x_val = info["x_pos"] - prev_x
                     delta_y_val = info["y_pos"] - prev_y
                     extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
@@ -210,20 +217,18 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     next_state_img = np.array(next_state_img)
                     if next_state_img.shape[-1] == 1:
                         next_state_img = np.squeeze(next_state_img, axis=-1)
-                    next_state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0  # (1, 4, 120, 128)
+                    next_state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0
 
                     # Rewards
-                    shaped_reward, x_pos, cur_world, subarea = calculate_shaped_reward(
-                        info, prev_x, prev_w, max_x, subarea
+                    shaped_reward, max_x, subarea = calculate_shaped_reward(
+                        info, done, prev_x, prev_w, max_x, subarea
                     )
-                    # Update prev_x, prev_y, prev_w, max_x for next step
-                    prev_x = x_pos
+                    prev_x = info["x_pos"]
                     prev_y = info["y_pos"]
-                    prev_w = cur_world
-                    max_x = max(max_x, x_pos)
+                    prev_w = info["world"]
 
                     episode_reward += shaped_reward
-                    replay_buffer.push(state.squeeze(0), action, shaped_reward, next_state.squeeze(0), done, delta_x_val, delta_y_val)
+                    replay_buffer.push(state.squeeze(0).cpu(), action, shaped_reward, next_state.squeeze(0).cpu(), done, delta_x_val, delta_y_val)
                     state = next_state
                     steps += 1
 
@@ -259,8 +264,13 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         #if i % 250 == 0:
                         #    print(f"Agent {agent_id}: DQN Step {i} done.")
                     
+                episode_rewards_this_epoch.append(episode_reward)
                 if episode % 5 == 0:
                     print(f"Agent {agent_id}: Episode {episode} done.")
+
+            if episode_rewards_this_epoch:
+                avg_reward = np.mean(episode_rewards_this_epoch)
+                writer.add_scalar("Train/AverageEpisodeReward", avg_reward, epoch)
 
             # --- Evaluation ---
             print(f"Agent {agent_id}: Starting Evaluation phase on {stage[0]}-{stage[1]}")
@@ -291,14 +301,13 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 if eval_next_state_img.shape[-1] == 1:
                     eval_next_state_img = np.squeeze(eval_next_state_img, axis=-1)
                 eval_next_state = torch.tensor(eval_next_state_img).unsqueeze(0).float().to(device) / 255.0
-                shaped_reward, x_pos, cur_world, subarea = calculate_shaped_reward(
-                    eval_info, prev_x, prev_w, max_x, subarea
+                shaped_reward, max_x, subarea = calculate_shaped_reward(
+                    eval_info, done, prev_x, prev_w, max_x, subarea
                 )
                 eval_reward += shaped_reward
-                prev_x = x_pos
+                prev_x = eval_info["x_pos"]
                 prev_y = eval_info["y_pos"]
-                prev_w = cur_world
-                max_x = max(max_x, x_pos)
+                prev_w = eval_info["world"]
                 eval_state = eval_next_state
 
             writer.add_scalar("Eval/Reward", eval_reward, epoch)
@@ -307,7 +316,8 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
             if eval_reward > best_score:
                 best_score = eval_reward
                 best_weights = copy.deepcopy(model.state_dict())
-                shared_best_weights[agent_id] = best_weights
+                cpu_state_dict = {k: v.cpu() for k, v in best_weights.items()}
+                shared_best_weights[agent_id] = cpu_state_dict
                 shared_best_score[agent_id] = best_score
 
             # --- PBT: Exploit/Explore ---
