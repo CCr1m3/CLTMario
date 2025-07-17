@@ -212,11 +212,12 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 print(f"[Agent {agent_id}] Invalid stage format in folder name: {stage_folder}")
                 return
                 
-            lambda_bc_epoch = lambda_bc * (lambda_bc_decay ** (epoch - 1))
-            writer.add_scalar("Lambda/BC", lambda_bc_epoch, epoch)
+            lambda_bc *= lambda_bc_decay ** (epoch - 1)
+            epsilon = max(epsilon_end, epsilon * epsilon_decay)
+            agent_hyperparams["lambda_bc"] = lambda_bc
             writer.add_scalar("Hyperparams/LearningRate", agent_hyperparams["lr"], epoch)
             writer.add_scalar("Hyperparams/LambdaBC", agent_hyperparams["lambda_bc"], epoch)
-            writer.add_scalar("Hyperparams/LambdaBC_Epoch", lambda_bc_epoch, epoch)
+            writer.add_scalar("Hyperparams/Epsilon", epsilon, epoch)
 
             print(f"Agent {agent_id}: Starting Exploration phase on {stage[0]}-{stage[1]}")
             episode_rewards_this_epoch = []
@@ -249,13 +250,12 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 while not done and steps < max_steps:
                     with torch.no_grad():
                         logits = model(state, extra=extra)
-                        epsilon = max(epsilon_end, epsilon * epsilon_decay)
-                        if random.random() < epsilon:
-                            action = random.randint(0, logits.shape[1] - 1)
+                        if random.random() < lambda_bc:
+                            probs = torch.softmax(logits, dim=1)
+                            action = torch.multinomial(probs, num_samples=1).item()
                         else:
-                            if random.random() < lambda_bc_epoch:
-                                probs = torch.softmax(logits, dim=1)
-                                action = torch.multinomial(probs, num_samples=1).item()
+                            if random.random() < epsilon:
+                                action = random.randint(0, logits.shape[1] - 1)
                             else:
                                 action = torch.argmax(logits, dim=1).item()
                     next_state_img, _, done, info = env.step(action)
@@ -339,7 +339,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         logits = model(batch_states, extra=batch_extra)
                         bc_loss = F.cross_entropy(logits, batch_actions)
 
-                        total_loss = (1 - lambda_bc_epoch) * dqn_loss + lambda_bc_epoch * bc_loss
+                        total_loss = (1 - lambda_bc) * dqn_loss + lambda_bc * bc_loss
 
                         optimizer.zero_grad()
                         total_loss.backward()
@@ -351,7 +351,6 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         writer.add_scalar("Debug/StdQValue", q_values.std().item(), global_step)
                         writer.add_scalar("Loss/DQN", dqn_loss.item(), global_step)
                         writer.add_scalar("Loss/Total", total_loss.item(), global_step)
-                        # writer.add_scalar("Loss/Total", lambda_bc_epoch * bc_loss + (1 - lambda_bc_epoch) * dqn_loss.item(), global_step)
                         global_step += 1
 
                         if global_step % 100 == 0:
@@ -431,11 +430,12 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     best_agent_id = all_scores.index(max_score)
                     model.load_state_dict(shared_best_weights[best_agent_id])
                     agent_hyperparams["lr"] *= np.random.uniform(0.9, 1.1)
-                    agent_hyperparams["lambda_bc"] *= np.random.uniform(0.9, 1.1)
+                    agent_hyperparams["lambda_bc"] *= np.random.uniform(1, 1.5)
                     agent_hyperparams["lr"] = float(np.clip(agent_hyperparams["lr"], 1e-5, 1e-3))
                     agent_hyperparams["lambda_bc"] = float(np.clip(agent_hyperparams["lambda_bc"], 0.001, 0.99))
                     optimizer = torch.optim.Adam(model.parameters(), lr=agent_hyperparams["lr"])
                     print(f"[Agent {agent_id}] Exploited best agent {best_agent_id} and mutated hyperparams: lr={agent_hyperparams['lr']:.5f}, lambda_bc={agent_hyperparams['lambda_bc']:.3f}")
+                    replay_buffer = ReplayBuffer(replay_buffer_size)
 
     except KeyboardInterrupt:
         print(f"\n[Agent {agent_id}] Training interrupted by user. Saving model...")
@@ -461,7 +461,7 @@ def population_based_training():
         agent_hyperparams_list.append({
             "batch_size": config["training"]["batch_size"],
             "lr": np.random.uniform(1e-5, 5e-4),
-            "lambda_bc": np.random.uniform(0.001, 0.99),
+            "lambda_bc": np.random.uniform(0.8, 0.99),
             "lambda_bc_decay": config["training"]["lambda_bc_decay"]
         })
 

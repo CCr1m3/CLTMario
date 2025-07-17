@@ -75,9 +75,9 @@ def test():
 
             with torch.no_grad():
                 logits = model(state, extra=extra)
-                #probs = torch.softmax(logits, dim=1)
-                #action = torch.multinomial(probs, num_samples=1).item()
-                action = torch.argmax(logits, dim=1).item()
+                probs = torch.softmax(logits, dim=1)
+                action = torch.multinomial(probs, num_samples=1).item()
+                #action = torch.argmax(logits, dim=1).item()
 
             obs, reward, done, info = env.step(action)
             pract = ""
