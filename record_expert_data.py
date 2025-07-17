@@ -7,7 +7,7 @@ import numpy as np
 import cv2
 import datetime
 from collections import deque
-from tkinter import simpledialog, ttk
+from tkinter import simpledialog, ttk, messagebox
 from utils.env_wrapper import make_env_human
 from utils.actions import CUSTOM_MOVEMENT
 
@@ -80,6 +80,7 @@ def record_expert_data():
 
     env = make_env_human(config["env"])
     states = []
+    prev_actions = []
     actions = []
     deltas_x = []
     deltas_y = []
@@ -105,6 +106,7 @@ def record_expert_data():
     info = env.unwrapped._get_info() if hasattr(env.unwrapped, "_get_info") else {}
     prev_x = info.get("x_pos", 0)
     prev_y = info.get("y_pos", 0)
+    prev_action = noop_action
 
     try:
         while not done:
@@ -128,6 +130,7 @@ def record_expert_data():
             action = get_action_from_keys(keys)
 
             next_state, reward, done_flag, info = env.step(action)
+            prev_actions.append(prev_action)
             actions.append(action)
 
             preprocessed = preprocess_frame(raw_frame)
@@ -139,6 +142,8 @@ def record_expert_data():
             stacked = torch.stack(list(frame_buffer), dim=0)
             states.append(stacked)
 
+            #print(info["time"], " ", info["x_pos"])
+
             x_pos = info.get("x_pos", prev_x)
             y_pos = info.get("y_pos", prev_y)
             delta_x = x_pos - prev_x
@@ -147,6 +152,7 @@ def record_expert_data():
             deltas_y.append(delta_y)
             prev_x = x_pos
             prev_y = y_pos
+            prev_action = action
 
             if info.get("flag_get", 1) or info.get("world", 1) != selected_stage[1][0]:
                 level_finished = True
@@ -163,6 +169,7 @@ def record_expert_data():
                                 done = True
                 waiting = False
                 state = env.reset()
+                prev_actions.clear()
                 actions.clear()
                 states.clear()
                 deltas_x.clear()
@@ -173,6 +180,7 @@ def record_expert_data():
 
             if reset_flag:
                 state = env.reset()
+                prev_actions.clear()
                 actions.clear()
                 states.clear()
                 deltas_x.clear()
@@ -204,6 +212,7 @@ def record_expert_data():
             pt_path = os.path.join(save_dir, f"expert_{world}_{stage}_{timestamp}.pt")
             torch.save({
                 "states": torch.stack(states),
+                "prev_actions": torch.tensor(prev_actions),
                 "actions": torch.tensor(actions),
                 "delta_x": torch.tensor(deltas_x, dtype=torch.float32),
                 "delta_y": torch.tensor(deltas_y, dtype=torch.float32)
@@ -212,5 +221,15 @@ def record_expert_data():
         else:
             print("Level not finished. No data saved.")
 
+def ask_record_again():
+    root = tk.Tk()
+    root.withdraw()
+    result = messagebox.askyesno("Continue?", "Record another run?")
+    root.destroy()
+    return result
+
 if __name__ == "__main__":
-    record_expert_data()
+    while True:
+        record_expert_data()
+        if not ask_record_again():
+            break

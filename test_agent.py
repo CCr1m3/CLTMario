@@ -9,6 +9,7 @@ from nes_py.wrappers import JoypadSpace
 from utils.actions import CUSTOM_MOVEMENT
 from utils.env_wrapper import PreprocessFrame, SkipFrame
 from gym.wrappers import FrameStack
+import torch.nn.functional as F
 import time
 
 def load_config(path="config.yaml"):
@@ -56,29 +57,33 @@ def test():
         if obs_arr.shape[-1] == 1:
             obs_arr = np.squeeze(obs_arr, axis=-1)
         state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0
+        prev_action = noop_action
+
+        cur_x = info.get("x_pos", 0)
+        cur_y = info.get("y_pos", 0)
 
         prev_x = info.get("x_pos", 0)
         prev_y = info.get("y_pos", 0)
+        extra = torch.tensor([[0, 0]], dtype=torch.float32).to(device)
+        prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
+        extra = torch.cat([extra, prev_action_onehot], dim=1)
 
         while True:
             if render:
                 env.render()
                 time.sleep(0.05)
 
-            # Calculate delta_x and delta_y
-            cur_x = info.get("x_pos", 0)
-            cur_y = info.get("y_pos", 0)
-            delta_x = cur_x - prev_x
-            delta_y = cur_y - prev_y
-            extra = torch.tensor([[delta_x, delta_y]], dtype=torch.float32).to(device)
-
             with torch.no_grad():
                 logits = model(state, extra=extra)
-                probs = torch.softmax(logits, dim=1)
-                action = torch.multinomial(probs, num_samples=1).item()
-                # action = torch.argmax(logits, dim=1).item()
+                #probs = torch.softmax(logits, dim=1)
+                #action = torch.multinomial(probs, num_samples=1).item()
+                action = torch.argmax(logits, dim=1).item()
 
             obs, reward, done, info = env.step(action)
+            pract = ""
+            for act in CUSTOM_MOVEMENT[action]:
+                pract += act + " "
+            print(f"action {action}: {pract}")
             obs_arr = np.array(obs)
             if obs_arr.shape[-1] == 1:
                 obs_arr = np.squeeze(obs_arr, axis=-1)
@@ -89,6 +94,15 @@ def test():
 
             prev_x = cur_x
             prev_y = cur_y
+            prev_action = action
+            cur_x = info.get("x_pos", 0)
+            cur_y = info.get("y_pos", 0)
+            delta_x = cur_x - prev_x
+            delta_y = cur_y - prev_y
+
+            extra = torch.tensor([[delta_x, delta_y]], dtype=torch.float32).to(device)
+            prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
+            extra = torch.cat([extra, prev_action_onehot], dim=1)
 
             if done or steps >= max_steps:
                 break
