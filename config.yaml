@@ -13,19 +13,19 @@ env:
 
 # Training
 training:
-  epochs: 15
-  bc_epochs: 3
+  epochs: 500
+  bc_epochs: 300
   updates_per_epoch: 100
   lr: 0.0005
   batch_size: 32
   gamma: 0.99
   epsilon_start: 1.0
-  epsilon_end: 0.3
+  epsilon_end: 0.125
   epsilon_decay: 0.95
   lambda_bc: 0.99
-  lambda_bc_decay: 0.96
+  lambda_bc_decay: 0.85
   exploration_episodes_per_epoch: 10
-  max_steps_per_episode: 750
+  max_steps_per_episode: 500
   dqn_steps_per_epoch: 1
   replaybuffersize: 40000
   target_update: 5

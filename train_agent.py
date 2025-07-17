@@ -22,20 +22,22 @@ class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
 
-    def push(self, state, action, reward, next_state, done, delta_x, delta_y):
-        self.buffer.append((state, action, reward, next_state, done, delta_x, delta_y))
+    def push(self, state, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y):
+        self.buffer.append((state, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones, delta_xs, delta_ys = zip(*batch)
+        states, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys = zip(*batch)
         states = torch.stack(states)
         actions = torch.tensor(actions)
         rewards = torch.tensor(rewards, dtype=torch.float32)
         next_states = torch.stack(next_states)
         dones = torch.tensor(dones, dtype=torch.float32)
+        last_delta_xs = torch.tensor(delta_xs, dtype=torch.float32)
+        last_delta_ys = torch.tensor(delta_ys, dtype=torch.float32)
         delta_xs = torch.tensor(delta_xs, dtype=torch.float32)
         delta_ys = torch.tensor(delta_ys, dtype=torch.float32)
-        return states, actions, rewards, next_states, dones, delta_xs, delta_ys
+        return states, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys
 
     def __len__(self):
         return len(self.buffer)
@@ -58,14 +60,16 @@ def make_env(stage, env_config):
     env = FrameStack(env, env_config.get("frame_stack", 4))
     return env
 
-def calculate_shaped_reward(info, done, prev_x, prev_w, max_x, subarea):
+def calculate_shaped_reward(info, done, prev_x, prev_y, prev_w, max_x, subarea):
     x_pos = info["x_pos"]
+    y_pos = info["y_pos"]
     delta_x = x_pos - prev_x
+    delta_y = y_pos - prev_y
     max_x = max(max_x, x_pos)
     shaped_reward = 0
     # Max distance reached
     if max_x == x_pos and x_pos != prev_x and not subarea:
-        shaped_reward += delta_x
+        shaped_reward += delta_x * 0.01
     # check entering subarea
     if np.abs(delta_x) > 15 and x_pos < 100:
         subarea = not subarea
@@ -73,18 +77,55 @@ def calculate_shaped_reward(info, done, prev_x, prev_w, max_x, subarea):
         subarea = not subarea
     # maintaining sprint
     if delta_x > 7 and delta_x < 15:
-        shaped_reward += 1
+        shaped_reward += 0.01
     # flag reached
     if info.get("flag_get", False):
-        shaped_reward += 500
+        shaped_reward += 5
     # warpzone
     cur_world = info["world"]
     if cur_world != prev_w:
-        shaped_reward += (cur_world - prev_w) * 12000
+        shaped_reward += (cur_world - prev_w) * 120
     # died
     if done and not info["flag_get"]:
-        shaped_reward -= 100
+        shaped_reward -= 3
+    # not moving
+    if delta_x == 0 and delta_y == 0:
+        shaped_reward -= 0.01
     return shaped_reward, max_x, subarea
+
+def bc_phase(agent_id, bc_epochs, optimizer, writer, device, model, expert_data, batch_size, global_step):
+    states = []
+    actions = []
+    delta_x = []
+    delta_y = []
+    for file in expert_data:
+        dataset = torch.load(file)
+        states.append(dataset["states"])
+        actions.append(dataset["actions"])
+        delta_x.append(dataset["delta_x"])
+        delta_y.append(dataset["delta_y"])
+    expert_dataset = TensorDataset(
+        torch.cat(states, dim=0),
+        torch.cat(actions, dim=0),
+        torch.cat(delta_x, dim=0),
+        torch.cat(delta_y, dim=0)
+    )
+    for epoch in range(1, bc_epochs+1):
+        expert_loader = DataLoader(expert_dataset, batch_size=batch_size, shuffle=True)
+        for batch_states, batch_actions, batch_delta_x, batch_delta_y in expert_loader:
+            batch_states = batch_states.to(device)
+            batch_actions = batch_actions.to(device)
+            batch_extra = torch.stack([batch_delta_x, batch_delta_y], dim=1).to(device)
+            logits = model(batch_states, extra=batch_extra)
+            bc_loss = F.cross_entropy(logits, batch_actions)
+            optimizer.zero_grad()
+            bc_loss.backward()
+            optimizer.step()
+            writer.add_scalar("Loss/BC", bc_loss.item(), global_step)
+            global_step += 1
+        if epoch % 5 == 0:
+            print(f"Agent {agent_id}: BC_Epoch {epoch} done.")
+    return model, global_step
 
 def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent_hyperparams, result_queue):
     # Set up agent-specific objects
@@ -103,30 +144,29 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = CNNPolicy(len(CUSTOM_MOVEMENT)).to(device)
+    target_model = copy.deepcopy(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     replay_buffer = ReplayBuffer(replay_buffer_size)
     writer = SummaryWriter(log_dir=f"runs/mario_training_agent_{agent_id}")
     global_step = 0
 
     num_epochs = config["training"]["epochs"]
+    bc_epochs = config["training"]["bc_epochs"]
     best_score = -float('inf')
     best_weights = None
-
 
     all_files = glob.glob(os.path.join(data_path, "*", "*.pt"))
     if not all_files:
         print(f"[Agent {agent_id}] No expert data found.")
         return
-    
-    for selected in all_files:
-        dataset = torch.load(selected)
-        states = dataset["states"]
-        actions = dataset["actions"]
-        delta_x = dataset["delta_x"]
-        delta_y = dataset["delta_y"]
-        for s, a, dx, dy in zip(states, actions, delta_x, delta_y):
-            replay_buffer.push(s.float().cpu() / 255.0, a.cpu().item(), 0.0, s.float().cpu() / 255.0, False, dx.item(), dy.item())
+
     try:
+        # --- Behaviour Cloning Phase ---
+        print(f"Agent {agent_id}: Starting Behavior Cloning phase")
+        model, global_step = bc_phase(
+            agent_id, bc_epochs, optimizer, writer, device, model, all_files, batch_size, global_step
+        )
+
         for epoch in range(1, num_epochs+1):
             print(f"[==========AGENT {agent_id}: EPOCH {epoch}==========]")
             # --- Load expert data for BC ---
@@ -138,44 +178,13 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
             except ValueError:
                 print(f"[Agent {agent_id}] Invalid stage format in folder name: {stage_folder}")
                 return
-            dataset = torch.load(selected)
-            states = dataset["states"]
-            actions = dataset["actions"]
-            delta_x = dataset["delta_x"]
-            delta_y = dataset["delta_y"]
 
-            lambda_bc_epoch = lambda_bc * (lambda_bc_decay ** epoch)
+            lambda_bc_epoch = lambda_bc * (lambda_bc_decay ** (epoch - 1))
             writer.add_scalar("Lambda/BC", lambda_bc_epoch, epoch)
             writer.add_scalar("Hyperparams/LearningRate", agent_hyperparams["lr"], epoch)
             writer.add_scalar("Hyperparams/LambdaBC", agent_hyperparams["lambda_bc"], epoch)
             writer.add_scalar("Hyperparams/LambdaBC_Epoch", lambda_bc_epoch, epoch)
 
-            if len(replay_buffer) < batch_size:
-                print("not enough replay_buffer, jumping to next epoch")
-                continue
-
-            # --- Behavior Cloning Phase ---
-            print(f"Agent {agent_id}: Starting Behavior Cloning phase on {stage[0]}-{stage[1]}")
-            expert_dataset = TensorDataset(
-                states.float() / 255.0,
-                actions,
-                delta_x,
-                delta_y
-            )
-            expert_loader = DataLoader(expert_dataset, batch_size=batch_size, shuffle=True)
-            for batch_states, batch_actions, batch_delta_x, batch_delta_y in expert_loader:
-                batch_states = batch_states.to(device)
-                batch_actions = batch_actions.to(device)
-                batch_extra = torch.stack([batch_delta_x, batch_delta_y], dim=1).to(device)
-                logits = model(batch_states, extra=batch_extra)
-                bc_loss = F.cross_entropy(logits, batch_actions)
-                optimizer.zero_grad()
-                bc_loss.backward()
-                optimizer.step()
-                writer.add_scalar("Loss/BC", bc_loss.item(), global_step)
-                global_step += 1
-
-            # --- Exploration Phase ---
             print(f"Agent {agent_id}: Starting Exploration phase on {stage[0]}-{stage[1]}")
             episode_rewards_this_epoch = []
             env = make_env(stage, config["env"])
@@ -192,16 +201,15 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 max_x = prev_x
                 prev_y = info["y_pos"]
                 prev_w = info["world"]
+                last_delta_x = 0
+                last_delta_y = 0
+                extra = torch.tensor([[0, 0]], dtype=torch.float32).to(device)
                 subarea = False
                 episode_reward = 0
                 max_steps = config["training"].get("max_steps_per_episode", 1000)
 
                 steps = 0
                 while not done and steps < max_steps:
-                    delta_x_val = info["x_pos"] - prev_x
-                    delta_y_val = info["y_pos"] - prev_y
-                    extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
-
                     with torch.no_grad():
                         logits = model(state, extra=extra)
                         epsilon = max(epsilon_end, epsilon_start * (epsilon_decay ** epoch))
@@ -218,35 +226,43 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     if next_state_img.shape[-1] == 1:
                         next_state_img = np.squeeze(next_state_img, axis=-1)
                     next_state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0
+                    delta_x_val = info["x_pos"] - prev_x
+                    delta_y_val = info["y_pos"] - prev_y
+                    extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
 
                     # Rewards
                     shaped_reward, max_x, subarea = calculate_shaped_reward(
-                        info, done, prev_x, prev_w, max_x, subarea
+                        info, done, prev_x, prev_y, prev_w, max_x, subarea
                     )
                     prev_x = info["x_pos"]
                     prev_y = info["y_pos"]
                     prev_w = info["world"]
 
                     episode_reward += shaped_reward
-                    replay_buffer.push(state.squeeze(0).cpu(), action, shaped_reward, next_state.squeeze(0).cpu(), done, delta_x_val, delta_y_val)
+                    replay_buffer.push(state.squeeze(0).cpu(), action, shaped_reward, next_state.squeeze(0).cpu(), done, last_delta_x, last_delta_y, delta_x_val, delta_y_val)
                     state = next_state
+                    last_delta_x = delta_x_val
+                    last_delta_y = delta_y_val
                     steps += 1
+
 
                     # --- DQN Phase ---
                     for i in range(dqn_steps_per_epoch):
                         if len(replay_buffer) < batch_size:
-                            break
-                        states, actions, rewards, next_states, dones, delta_xs, delta_ys = replay_buffer.sample(batch_size)
+                            #print("not enough replay_buffer, jumping to next exploration step")
+                            continue
+                        states, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys = replay_buffer.sample(batch_size)
                         states = states.to(device)
                         actions = actions.to(device)
                         rewards = rewards.to(device)
                         next_states = next_states.to(device)
                         dones = dones.to(device)
-                        batch_extra = torch.stack([delta_xs, delta_ys], dim=1).to(device)
+                        batch_extra = torch.stack([last_delta_xs, last_delta_ys], dim=1).to(device)
+                        next_batch_extra = torch.stack([delta_xs, delta_ys], dim=1).to(device)
 
                         q_values = model(states, extra=batch_extra)
                         with torch.no_grad():
-                            next_q_values = model(next_states, extra=batch_extra)
+                            next_q_values = target_model(next_states, extra=next_batch_extra)
                             max_next_q = next_q_values.max(1)[0]
                             q_target = rewards + gamma * (1 - dones) * max_next_q
 
@@ -257,13 +273,17 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         dqn_loss.backward()
                         optimizer.step()
 
+                        writer.add_scalar("Debug/MeanQValue", q_values.mean().item(), global_step)
                         writer.add_scalar("Loss/DQN", dqn_loss.item(), global_step)
-                        writer.add_scalar("Loss/Total", lambda_bc_epoch * bc_loss + (1 - lambda_bc_epoch) * dqn_loss.item(), global_step)
+                        # writer.add_scalar("Loss/Total", lambda_bc_epoch * bc_loss + (1 - lambda_bc_epoch) * dqn_loss.item(), global_step)
                         global_step += 1
+
+                        if global_step % 500 == 0:
+                            target_model.load_state_dict(model.state_dict())
                         
                         #if i % 250 == 0:
                         #    print(f"Agent {agent_id}: DQN Step {i} done.")
-                    
+                        
                 episode_rewards_this_epoch.append(episode_reward)
                 if episode % 5 == 0:
                     print(f"Agent {agent_id}: Episode {episode} done.")
@@ -295,14 +315,16 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 eval_extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
                 with torch.no_grad():
                     eval_logits = model(eval_state, extra=eval_extra)
-                    eval_action = torch.argmax(eval_logits, dim=1).item()
+                    # eval_action = torch.argmax(eval_logits, dim=1).item()
+                    eval_probs = torch.softmax(eval_logits, dim=1)
+                    eval_action = torch.multinomial(eval_probs, num_samples=1).item()
                 eval_next_state_img, _, eval_done, eval_info = eval_env.step(eval_action)
                 eval_next_state_img = np.array(eval_next_state_img)
                 if eval_next_state_img.shape[-1] == 1:
                     eval_next_state_img = np.squeeze(eval_next_state_img, axis=-1)
                 eval_next_state = torch.tensor(eval_next_state_img).unsqueeze(0).float().to(device) / 255.0
                 shaped_reward, max_x, subarea = calculate_shaped_reward(
-                    eval_info, done, prev_x, prev_w, max_x, subarea
+                    eval_info, eval_done, prev_x, prev_y, prev_w, max_x, subarea
                 )
                 eval_reward += shaped_reward
                 prev_x = eval_info["x_pos"]
@@ -329,7 +351,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     model.load_state_dict(shared_best_weights[best_agent_id])
                     agent_hyperparams["lr"] *= np.random.uniform(0.8, 1.2)
                     agent_hyperparams["lambda_bc"] *= np.random.uniform(0.8, 1.2)
-                    agent_hyperparams["lr"] = float(np.clip(agent_hyperparams["lr"], 1e-5, 1e-2))
+                    agent_hyperparams["lr"] = float(np.clip(agent_hyperparams["lr"], 1e-4, 1e-1))
                     agent_hyperparams["lambda_bc"] = float(np.clip(agent_hyperparams["lambda_bc"], 0.01, 1.0))
                     optimizer = torch.optim.Adam(model.parameters(), lr=agent_hyperparams["lr"])
                     print(f"[Agent {agent_id}] Exploited best agent {best_agent_id} and mutated hyperparams: lr={agent_hyperparams['lr']:.5f}, lambda_bc={agent_hyperparams['lambda_bc']:.3f}")
@@ -357,7 +379,7 @@ def population_based_training():
     for _ in range(num_agents):
         agent_hyperparams_list.append({
             "batch_size": config["training"]["batch_size"],
-            "lr": np.random.uniform(1e-4, 1e-3),
+            "lr": np.random.uniform(1e-4, 1e-2),
             "lambda_bc": np.random.uniform(0.5, 1.0),
             "lambda_bc_decay": config["training"]["lambda_bc_decay"]
         })
