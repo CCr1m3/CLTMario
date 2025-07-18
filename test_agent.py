@@ -56,7 +56,7 @@ def test():
         obs_arr = np.array(obs)
         if obs_arr.shape[-1] == 1:
             obs_arr = np.squeeze(obs_arr, axis=-1)
-        state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0
+        state = torch.tensor(obs_arr).unsqueeze(0).float().to(device)
         prev_action = noop_action
 
         cur_x = info.get("x_pos", 0)
@@ -66,7 +66,7 @@ def test():
         prev_y = info.get("y_pos", 0)
         extra = torch.tensor([[0, 0]], dtype=torch.float32).to(device)
         prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-        pos = torch.tensor([prev_x, prev_y], dtype=torch.float32).to(device)
+        pos = torch.tensor([[prev_x, prev_y]], dtype=torch.float32).to(device)
         extra = torch.cat([extra, prev_action_onehot, pos], dim=1)
 
         while True:
@@ -88,7 +88,7 @@ def test():
             obs_arr = np.array(obs)
             if obs_arr.shape[-1] == 1:
                 obs_arr = np.squeeze(obs_arr, axis=-1)
-            state = torch.tensor(obs_arr).unsqueeze(0).float().to(device) / 255.0
+            state = torch.tensor(obs_arr).unsqueeze(0).float().to(device)
 
             total_reward += reward
             steps += 1
@@ -103,7 +103,7 @@ def test():
 
             extra = torch.tensor([[delta_x, delta_y]], dtype=torch.float32).to(device)
             prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-            pos = torch.tensor([cur_x, cur_y], dtype=torch.float32).to(device)
+            pos = torch.tensor([[cur_x, cur_y]], dtype=torch.float32).to(device)
             extra = torch.cat([extra, prev_action_onehot, pos], dim=1)
 
             if done or steps >= max_steps:

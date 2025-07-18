@@ -22,7 +22,7 @@ training:
   epsilon_start: 0.9
   epsilon_end: 0.3
   epsilon_decay: 0.998
-  lambda_bc: 0.99
+  lambda_bc: 0.7
   lambda_bc_decay: 0.96
   exploration_episodes_per_epoch: 10
   max_steps_per_episode: 400
@@ -31,6 +31,7 @@ training:
   target_update: 5
   pbt_population_size: 2
   pbt_exploit_interval: 10
+  burn_in_steps: 1000
   save_path: "models/combined_model.pt"
 
 

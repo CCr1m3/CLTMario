@@ -26,8 +26,23 @@ class ReplayBuffer:
     def push(self, state, prev_action, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y, last_pos_x, last_pos_y, pos_x, pos_y):
         self.buffer.append((state, prev_action, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y, last_pos_x, last_pos_y, pos_x, pos_y))
 
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
+    def sample(self, batch_size, recent_fraction=0.3, p_recent=0.5):
+        buffer_size = len(self.buffer)
+        recent_cut = int(recent_fraction * buffer_size)
+
+        indices = []
+        for _ in range(batch_size):
+            if random.random() < p_recent and recent_cut > 0:
+                # sample from most recent part
+                idx = buffer_size - 1 - random.randint(0, recent_cut - 1)
+            else:
+                idx = random.randint(0, buffer_size - 1)
+            indices.append(idx)
+
+        batch = [self.buffer[i] for i in indices]
+        return self._process_batch(batch)
+
+    def _process_batch(self, batch):
         states, prev_actions, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys, last_pos_xs, last_pos_ys, pos_xs, pos_ys = zip(*batch)
         states = torch.stack(states)
         prev_actions = torch.tensor(prev_actions)
@@ -35,9 +50,9 @@ class ReplayBuffer:
         rewards = torch.tensor(rewards, dtype=torch.float32)
         next_states = torch.stack(next_states)
         dones = torch.tensor(dones, dtype=torch.float32)
-        last_delta_xs = torch.tensor(delta_xs, dtype=torch.float32)
-        last_delta_ys = torch.tensor(delta_ys, dtype=torch.float32)
-        delta_xs = torch.tensor(delta_xs, dtype=torch.float32)
+        last_delta_xs = torch.tensor(last_delta_xs, dtype=torch.float32)
+        last_delta_ys = torch.tensor(last_delta_ys, dtype=torch.float32)
+        delta_xs = torch.tensor(delta_xs, dtype=torch.float32)    
         delta_ys = torch.tensor(delta_ys, dtype=torch.float32)
         last_pos_xs = torch.tensor(last_pos_xs, dtype=torch.float32)
         last_pos_ys = torch.tensor(last_pos_ys, dtype=torch.float32)
@@ -161,6 +176,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
     epsilon = config["training"]["epsilon_start"]
     epsilon_end = config["training"]["epsilon_end"]
     epsilon_decay = config["training"]["epsilon_decay"]
+    burn_in_steps = config["training"]["burn_in_steps"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = CNNPolicy(len(CUSTOM_MOVEMENT)).to(device)
@@ -169,6 +185,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
     replay_buffer = ReplayBuffer(replay_buffer_size)
     writer = SummaryWriter(log_dir=f"runs/mario_training_agent_{agent_id}")
     global_step = 0
+    skip_learning_until = -1
 
     num_epochs = config["training"]["epochs"]
     bc_epochs = config["training"]["bc_epochs"]
@@ -227,7 +244,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 print(f"[Agent {agent_id}] Invalid stage format in folder name: {stage_folder}")
                 return
                 
-            lambda_bc *= lambda_bc_decay ** (epoch - 1)
+            lambda_bc *= lambda_bc_decay
             epsilon = max(epsilon_end, epsilon * epsilon_decay)
             agent_hyperparams["lambda_bc"] = lambda_bc
             writer.add_scalar("Hyperparams/LearningRate", agent_hyperparams["lr"], epoch)
@@ -245,7 +262,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 next_state_img = np.array(next_state_img)
                 if next_state_img.shape[-1] == 1:
                     next_state_img = np.squeeze(next_state_img, axis=-1)
-                state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0
+                state = torch.tensor(next_state_img).unsqueeze(0).float().to(device)
                 done = False
                 prev_x = info["x_pos"]
                 max_x = prev_x
@@ -278,7 +295,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     next_state_img = np.array(next_state_img)
                     if next_state_img.shape[-1] == 1:
                         next_state_img = np.squeeze(next_state_img, axis=-1)
-                    next_state = torch.tensor(next_state_img).unsqueeze(0).float().to(device) / 255.0
+                    next_state = torch.tensor(next_state_img).unsqueeze(0).float().to(device)
                     delta_x_val = info["x_pos"] - prev_x
                     delta_y_val = info["y_pos"] - prev_y
                     extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
@@ -290,12 +307,11 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     shaped_reward, max_x, subarea, time_subarea = calculate_shaped_reward(
                         info, done, prev_x, prev_y, prev_w, max_x, subarea, time_subarea
                     )
-                    print(f"Agent {agent_id}: Shaped Reward: {shaped_reward}")
-                    prev_x = info["x_pos"]
-                    prev_y = info["y_pos"]
-                    prev_w = info["world"]
+                    #print(f"Agent {agent_id}: Shaped Reward: {shaped_reward}")
 
                     episode_reward += shaped_reward
+                    # Store transition BEFORE updating the position trackers so that
+                    #  last_pos_* corresponds to the state *before* executing the action
                     replay_buffer.push(
                         state.squeeze(0).cpu().clone().detach(),
                         prev_action,
@@ -312,6 +328,10 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         info["x_pos"],
                         info["y_pos"]
                     )
+
+                    prev_x = info["x_pos"]
+                    prev_y = info["y_pos"]
+                    prev_w = info["world"]
                     state = next_state
                     last_delta_x = delta_x_val
                     last_delta_y = delta_y_val
@@ -321,6 +341,9 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
 
 
                     # --- DQN Phase ---
+                    if global_step < skip_learning_until:
+                        continue
+
                     for i in range(dqn_steps_per_epoch):
                         if len(replay_buffer) < batch_size:
                             #print("not enough replay_buffer, jumping to next exploration step")
@@ -369,6 +392,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
 
                         optimizer.zero_grad()
                         total_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
                         optimizer.step()
 
                         writer.add_scalar("Debug/MeanQValue", q_values.mean().item(), global_step)
@@ -384,6 +408,8 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         
                         #if i % 250 == 0:
                         #    print(f"Agent {agent_id}: DQN Step {i} done.")
+                    if steps % 100 == 0:
+                        print(f"Agent {agent_id}: Reward: {episode_reward}")
                         
                 episode_rewards_this_epoch.append(episode_reward)
                 if episode % 5 == 0:
@@ -402,7 +428,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
             eval_next_state_img = np.array(eval_next_state_img)
             if eval_next_state_img.shape[-1] == 1:
                 eval_next_state_img = np.squeeze(eval_next_state_img, axis=-1)
-            eval_state = torch.tensor(eval_next_state_img).unsqueeze(0).float().to(device) / 255.0
+            eval_state = torch.tensor(eval_next_state_img).unsqueeze(0).float().to(device)
             eval_done = False
             prev_x = eval_info["x_pos"]
             prev_y = eval_info["y_pos"]
@@ -428,7 +454,7 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 eval_next_state_img = np.array(eval_next_state_img)
                 if eval_next_state_img.shape[-1] == 1:
                     eval_next_state_img = np.squeeze(eval_next_state_img, axis=-1)
-                eval_next_state = torch.tensor(eval_next_state_img).unsqueeze(0).float().to(device) / 255.0
+                eval_next_state = torch.tensor(eval_next_state_img).unsqueeze(0).float().to(device)
                 shaped_reward, max_x, subarea, time_subarea = calculate_shaped_reward(
                     eval_info, eval_done, prev_x, prev_y, prev_w, max_x, subarea, time_subarea
                 )
@@ -464,13 +490,16 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 if best_score < max_score:
                     best_agent_id = all_scores.index(max_score)
                     model.load_state_dict(shared_best_weights[best_agent_id])
+                    target_model.load_state_dict(model.state_dict())
                     agent_hyperparams["lr"] *= np.random.uniform(0.9, 1.1)
                     agent_hyperparams["lambda_bc"] *= np.random.uniform(1, 1.5)
                     agent_hyperparams["lr"] = float(np.clip(agent_hyperparams["lr"], 1e-5, 1e-3))
                     agent_hyperparams["lambda_bc"] = float(np.clip(agent_hyperparams["lambda_bc"], 0.001, 0.99))
                     optimizer = torch.optim.Adam(model.parameters(), lr=agent_hyperparams["lr"])
                     print(f"[Agent {agent_id}] Exploited best agent {best_agent_id} and mutated hyperparams: lr={agent_hyperparams['lr']:.5f}, lambda_bc={agent_hyperparams['lambda_bc']:.3f}")
-                    replay_buffer = ReplayBuffer(replay_buffer_size)
+                    retained = int(0.6 * len(replay_buffer.buffer))
+                    replay_buffer.buffer = deque(list(replay_buffer.buffer)[-retained:], maxlen=replay_buffer_size)
+                    skip_learning_until = burn_in_steps + global_step
 
     except KeyboardInterrupt:
         print(f"\n[Agent {agent_id}] Training interrupted by user. Saving model...")
@@ -496,7 +525,7 @@ def population_based_training():
         agent_hyperparams_list.append({
             "batch_size": config["training"]["batch_size"],
             "lr": np.random.uniform(1e-5, 5e-4),
-            "lambda_bc": np.random.uniform(0.8, 0.99),
+            "lambda_bc": np.random.uniform(0.4, 0.6),
             "lambda_bc_decay": config["training"]["lambda_bc_decay"]
         })
 
