@@ -84,6 +84,8 @@ def record_expert_data():
     actions = []
     deltas_x = []
     deltas_y = []
+    pos_x = []
+    pos_y = []
 
     frame_stack = config["env"].get("frame_stack", 4)
     frame_buffer = deque(maxlen=frame_stack)
@@ -146,6 +148,8 @@ def record_expert_data():
 
             x_pos = info.get("x_pos", prev_x)
             y_pos = info.get("y_pos", prev_y)
+            pos_x.append(x_pos)
+            pos_y.append(y_pos)
             delta_x = x_pos - prev_x
             delta_y = y_pos - prev_y
             deltas_x.append(delta_x)
@@ -174,6 +178,8 @@ def record_expert_data():
                 states.clear()
                 deltas_x.clear()
                 deltas_y.clear()
+                pos_x.clear()
+                pos_y.clear()
                 frame_buffer.clear()
                 reset_flag = False
                 continue
@@ -185,6 +191,8 @@ def record_expert_data():
                 states.clear()
                 deltas_x.clear()
                 deltas_y.clear()
+                pos_x.clear()
+                pos_y.clear()
                 frame_buffer.clear()
                 reset_flag = False
                 continue
@@ -215,7 +223,9 @@ def record_expert_data():
                 "prev_actions": torch.tensor(prev_actions),
                 "actions": torch.tensor(actions),
                 "delta_x": torch.tensor(deltas_x, dtype=torch.float32),
-                "delta_y": torch.tensor(deltas_y, dtype=torch.float32)
+                "delta_y": torch.tensor(deltas_y, dtype=torch.float32),
+                "pos_x": torch.tensor(pos_x, dtype=torch.float32),
+                "pos_y": torch.tensor(pos_y, dtype=torch.float32)
             }, pt_path)
             print(f"Saved expert data to {pt_path}")
         else:

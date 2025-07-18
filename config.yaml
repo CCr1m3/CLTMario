@@ -21,16 +21,16 @@ training:
   gamma: 0.99
   epsilon_start: 0.9
   epsilon_end: 0.3
-  epsilon_decay: 0.95
+  epsilon_decay: 0.998
   lambda_bc: 0.99
-  lambda_bc_decay: 0.95
-  exploration_episodes_per_epoch: 20
+  lambda_bc_decay: 0.96
+  exploration_episodes_per_epoch: 10
   max_steps_per_episode: 400
   dqn_steps_per_epoch: 1
   replaybuffersize: 20000
   target_update: 5
   pbt_population_size: 2
-  pbt_exploit_interval: 5
+  pbt_exploit_interval: 10
   save_path: "models/combined_model.pt"
 
 

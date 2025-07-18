@@ -23,12 +23,12 @@ class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
 
-    def push(self, state, prev_action, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y):
-        self.buffer.append((state, prev_action, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y))
+    def push(self, state, prev_action, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y, last_pos_x, last_pos_y, pos_x, pos_y):
+        self.buffer.append((state, prev_action, action, reward, next_state, done, last_delta_x, last_delta_y, delta_x, delta_y, last_pos_x, last_pos_y, pos_x, pos_y))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        states, prev_actions, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys = zip(*batch)
+        states, prev_actions, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys, last_pos_xs, last_pos_ys, pos_xs, pos_ys = zip(*batch)
         states = torch.stack(states)
         prev_actions = torch.tensor(prev_actions)
         actions = torch.tensor(actions)
@@ -39,7 +39,11 @@ class ReplayBuffer:
         last_delta_ys = torch.tensor(delta_ys, dtype=torch.float32)
         delta_xs = torch.tensor(delta_xs, dtype=torch.float32)
         delta_ys = torch.tensor(delta_ys, dtype=torch.float32)
-        return states, prev_actions, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys
+        last_pos_xs = torch.tensor(last_pos_xs, dtype=torch.float32)
+        last_pos_ys = torch.tensor(last_pos_ys, dtype=torch.float32)
+        pos_xs = torch.tensor(pos_xs, dtype=torch.float32)
+        pos_ys = torch.tensor(pos_ys, dtype=torch.float32)
+        return states, prev_actions, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys, last_pos_xs, last_pos_ys, pos_xs, pos_ys
 
     def __len__(self):
         return len(self.buffer)
@@ -90,6 +94,9 @@ def calculate_shaped_reward(info, done, prev_x, prev_y, prev_w, max_x, subarea, 
     #elif abs(delta_x) > 3 and abs(delta_x) < 7:
     #    shaped_reward += 0.005
     # flag reached
+    # reward jumping
+    if delta_y > 1:
+        shaped_reward += 0.02
     if info.get("flag_get", False):
         shaped_reward += 5
     # warpzone
@@ -98,27 +105,29 @@ def calculate_shaped_reward(info, done, prev_x, prev_y, prev_w, max_x, subarea, 
         shaped_reward += (cur_world - prev_w) * 120
     # died
     if done and not info["flag_get"]:
-        shaped_reward -= 3
+        shaped_reward -= 5
     # not moving
     if x_pos < x_pos_min:
-        shaped_reward -= 0.01
+        pun = (x_pos_min - x_pos) / 30
+        shaped_reward -= 0.01 * pun
+    # survival
+    shaped_reward += 0.01
     # prior rewards
     #if delta_x == 0 and delta_y == 0:
-    #    shaped_reward -= 0.01
-    #if shaped_reward == 0:
     #    shaped_reward -= 0.01
     return shaped_reward, max_x, subarea, time_subarea
 
 def bc_phase(agent_id, bc_epochs, optimizer, writer, device, model, expert_dataset, batch_size, global_step):
     for bc_epoch in range(1, bc_epochs+1):
         expert_loader = DataLoader(expert_dataset, batch_size=batch_size, shuffle=True)
-        for batch_states, batch_prev_actions, batch_actions, batch_delta_x, batch_delta_y in expert_loader:
+        for batch_states, batch_prev_actions, batch_actions, batch_delta_x, batch_delta_y, batch_x_pos, batch_y_pos in expert_loader:
             batch_states = batch_states.to(device)
             batch_prev_actions = batch_prev_actions.to(device)
             batch_actions = batch_actions.to(device)
             batch_extra = torch.stack([batch_delta_x, batch_delta_y], dim=1).to(device)
             batch_prev_actions_onehot = F.one_hot(batch_prev_actions, num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-            batch_extra = torch.cat([batch_extra, batch_prev_actions_onehot], dim=1)
+            batch_pos = torch.stack([batch_x_pos, batch_y_pos], dim=1).to(device)
+            batch_extra = torch.cat([batch_extra, batch_prev_actions_onehot, batch_pos], dim=1)
             logits = model(batch_states, extra=batch_extra)
             bc_loss = F.cross_entropy(logits, batch_actions)
             optimizer.zero_grad()
@@ -180,6 +189,8 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
         actions = []
         delta_x = []
         delta_y = []
+        pos_x = []
+        pos_y = []
         for file in all_files:
             dataset = torch.load(file)
             states.append(dataset["states"])
@@ -187,12 +198,16 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
             actions.append(dataset["actions"])
             delta_x.append(dataset["delta_x"])
             delta_y.append(dataset["delta_y"])
+            pos_x.append(dataset["pos_x"])
+            pos_y.append(dataset["pos_y"])
         expert_dataset = TensorDataset(
             torch.cat(states, dim=0),
             torch.cat(prev_actions, dim=0),
             torch.cat(actions, dim=0),
             torch.cat(delta_x, dim=0),
-            torch.cat(delta_y, dim=0)
+            torch.cat(delta_y, dim=0),
+            torch.cat(pos_x, dim=0),
+            torch.cat(pos_y, dim=0)
         )
         model, global_step = bc_phase(
             agent_id, bc_epochs, optimizer, writer, device, model, expert_dataset, batch_size, global_step
@@ -240,7 +255,8 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                 last_delta_y = 0
                 extra = torch.tensor([[0, 0]], dtype=torch.float32).to(device)
                 prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-                extra = torch.cat([extra, prev_action_onehot], dim=1)
+                pos = torch.tensor([[prev_x, prev_y]], dtype=torch.float32).to(device)
+                extra = torch.cat([extra, prev_action_onehot, pos], dim=1)
                 subarea = False
                 time_subarea = 0
                 episode_reward = 0
@@ -267,13 +283,14 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     delta_y_val = info["y_pos"] - prev_y
                     extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
                     prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-                    extra = torch.cat([extra, prev_action_onehot], dim=1)
+                    pos = torch.tensor([[info["x_pos"], info["y_pos"]]], dtype=torch.float32).to(device)
+                    extra = torch.cat([extra, prev_action_onehot, pos], dim=1)
 
                     # Rewards
                     shaped_reward, max_x, subarea, time_subarea = calculate_shaped_reward(
                         info, done, prev_x, prev_y, prev_w, max_x, subarea, time_subarea
                     )
-                    #print(f"Agent {agent_id}: Shaped Reward: {shaped_reward}")
+                    print(f"Agent {agent_id}: Shaped Reward: {shaped_reward}")
                     prev_x = info["x_pos"]
                     prev_y = info["y_pos"]
                     prev_w = info["world"]
@@ -289,7 +306,11 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         last_delta_x,
                         last_delta_y,
                         delta_x_val,
-                        delta_y_val
+                        delta_y_val,
+                        prev_x,
+                        prev_y,
+                        info["x_pos"],
+                        info["y_pos"]
                     )
                     state = next_state
                     last_delta_x = delta_x_val
@@ -304,19 +325,23 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         if len(replay_buffer) < batch_size:
                             #print("not enough replay_buffer, jumping to next exploration step")
                             continue
-                        states, prev_actions, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys = replay_buffer.sample(batch_size)
+                        states, prev_actions, actions, rewards, next_states, dones, last_delta_xs, last_delta_ys, delta_xs, delta_ys, last_pos_x, last_pos_y, pos_x, pos_y = replay_buffer.sample(batch_size)
                         states = states.to(device)
                         prev_actions = prev_actions.to(device)
                         actions = actions.to(device)
                         rewards = rewards.to(device)
                         next_states = next_states.to(device)
                         dones = dones.to(device)
+
                         batch_extra = torch.stack([last_delta_xs, last_delta_ys], dim=1).to(device)
                         prev_actions_onehot = F.one_hot(prev_actions, num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-                        batch_extra = torch.cat([batch_extra, prev_actions_onehot], dim=1)
+                        batch_pos = torch.stack([last_pos_x, last_pos_y], dim=1).to(device)
+                        batch_extra = torch.cat([batch_extra, prev_actions_onehot, batch_pos], dim=1)
+
                         next_batch_extra = torch.stack([delta_xs, delta_ys], dim=1).to(device)
                         next_actions_onehot = F.one_hot(actions, num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-                        next_batch_extra = torch.cat([next_batch_extra, next_actions_onehot], dim=1)
+                        next_batch_pos = torch.stack([pos_x, pos_y], dim=1).to(device)
+                        next_batch_extra = torch.cat([next_batch_extra, next_actions_onehot, next_batch_pos], dim=1)
 
                         q_values = model(states, extra=batch_extra)
                         with torch.no_grad():
@@ -329,13 +354,14 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                         q_pred = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
                         dqn_loss = F.mse_loss(q_pred, q_target)
                         
-                        batch_states, batch_prev_actions, batch_actions, batch_delta_x, batch_delta_y = next(expert_iter)
+                        batch_states, batch_prev_actions, batch_actions, batch_delta_x, batch_delta_y, batch_x_pos, batch_y_pos = next(expert_iter)
                         batch_states = batch_states.to(device)
                         batch_prev_actions = batch_prev_actions.to(device)
                         batch_actions = batch_actions.to(device)
                         batch_extra = torch.stack([batch_delta_x, batch_delta_y], dim=1).to(device)
                         batch_prev_actions_onehot = F.one_hot(batch_prev_actions, num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-                        batch_extra = torch.cat([batch_extra, batch_prev_actions_onehot], dim=1)
+                        batch_pos = torch.stack([batch_x_pos, batch_y_pos], dim=1).to(device)
+                        batch_extra = torch.cat([batch_extra, batch_prev_actions_onehot, batch_pos], dim=1)
                         logits = model(batch_states, extra=batch_extra)
                         bc_loss = F.cross_entropy(logits, batch_actions)
 
@@ -386,12 +412,13 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
             time_subarea = 0
             eval_reward = 0
             eval_prev_action = noop_action
+            delta_x_val = 0
+            delta_y_val = 0
+            eval_extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
+            eval_prev_action_onehot = F.one_hot(torch.tensor([eval_prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
+            eval_pos = torch.tensor([[prev_x, prev_y]], dtype=torch.float32).to(device)
+            eval_extra = torch.cat([eval_extra, eval_prev_action_onehot, eval_pos], dim=1)
             while not eval_done:
-                delta_x_val = eval_info["x_pos"] - prev_x
-                delta_y_val = eval_info["y_pos"] - prev_y
-                eval_extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
-                eval_prev_action_onehot = F.one_hot(torch.tensor([eval_prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-                eval_extra = torch.cat([eval_extra, eval_prev_action_onehot], dim=1)
                 with torch.no_grad():
                     eval_logits = model(eval_state, extra=eval_extra)
                     eval_action = torch.argmax(eval_logits, dim=1).item()
@@ -406,8 +433,16 @@ def agent_worker(agent_id, config, shared_best_weights, shared_best_score, agent
                     eval_info, eval_done, prev_x, prev_y, prev_w, max_x, subarea, time_subarea
                 )
                 eval_reward += shaped_reward
-                prev_x = eval_info["x_pos"]
-                prev_y = eval_info["y_pos"]
+                eval_cur_x = eval_info["x_pos"]
+                eval_cur_y = eval_info["y_pos"]
+                delta_x_val = eval_cur_x - prev_x
+                delta_y_val = eval_cur_y - prev_y
+                eval_extra = torch.tensor([[delta_x_val, delta_y_val]], dtype=torch.float32).to(device)
+                eval_prev_action_onehot = F.one_hot(torch.tensor([eval_prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
+                eval_pos = torch.tensor([[eval_cur_x, eval_cur_y]], dtype=torch.float32).to(device)
+                eval_extra = torch.cat([eval_extra, eval_prev_action_onehot, eval_pos], dim=1)
+                prev_x = eval_cur_x
+                prev_y = eval_cur_y
                 prev_w = eval_info["world"]
                 eval_prev_action = eval_action
                 eval_state = eval_next_state

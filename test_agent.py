@@ -66,7 +66,8 @@ def test():
         prev_y = info.get("y_pos", 0)
         extra = torch.tensor([[0, 0]], dtype=torch.float32).to(device)
         prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-        extra = torch.cat([extra, prev_action_onehot], dim=1)
+        pos = torch.tensor([prev_x, prev_y], dtype=torch.float32).to(device)
+        extra = torch.cat([extra, prev_action_onehot, pos], dim=1)
 
         while True:
             if render:
@@ -75,9 +76,9 @@ def test():
 
             with torch.no_grad():
                 logits = model(state, extra=extra)
-                probs = torch.softmax(logits, dim=1)
-                action = torch.multinomial(probs, num_samples=1).item()
-                #action = torch.argmax(logits, dim=1).item()
+                #probs = torch.softmax(logits, dim=1)
+                #action = torch.multinomial(probs, num_samples=1).item()
+                action = torch.argmax(logits, dim=1).item()
 
             obs, reward, done, info = env.step(action)
             pract = ""
@@ -102,7 +103,8 @@ def test():
 
             extra = torch.tensor([[delta_x, delta_y]], dtype=torch.float32).to(device)
             prev_action_onehot = F.one_hot(torch.tensor([prev_action]), num_classes=len(CUSTOM_MOVEMENT)).float().to(device)
-            extra = torch.cat([extra, prev_action_onehot], dim=1)
+            pos = torch.tensor([cur_x, cur_y], dtype=torch.float32).to(device)
+            extra = torch.cat([extra, prev_action_onehot, pos], dim=1)
 
             if done or steps >= max_steps:
                 break
